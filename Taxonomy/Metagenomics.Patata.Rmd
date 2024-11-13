@@ -1,0 +1,1164 @@
+---
+title: "Bioinformatics Analysis METAS project. Potato dataset"
+output:
+  html_document:
+    code_folding: hide
+    fig_caption: yes
+    number_sections: yes
+    theme: paper
+    toc: true
+    toc_float: yes
+  html_notebook:
+    code_folding: hide
+    fig_caption: yes
+    number_sections: yes
+    theme: paper
+    toc: true
+    toc_float: yes
+  pdf_document:
+    toc: yes
+subtitle: "Shotgun and ITS sequencing data from patata rhizosphere."
+---
+  
+# Load Packages
+  
+```{r Load Packages, include=FALSE}
+library("RColorBrewer")
+library("patchwork")
+library("tidyverse")
+library("ggplot2")      
+library("dplyr")        
+library("phyloseq")
+library("readxl")
+library("tibble")
+library("vegan")
+library("DivNet")
+library("DESeq2")
+library("dendextend") 
+library("tidyverse")
+library("ranacapa")
+library("ggpubr")
+library("microbial")
+library("rmarkdown")
+```
+
+```{r, echo=FALSE}
+
+#htmltools::img(src = knitr::image_uri("logo-genomics4all-vertical-monocromo-positivo.png"), 
+#alt = 'logo', 
+#style = 'position:absolute; top:0; right:0; padding:10px; width: 300px; height: 128px') # Added width and height as CSS
+
+
+htmltools::img (src = knitr::image_uri("../../../logo-genomics4all-horizontal-monocromo-positivo.jpg"), 
+                alt = 'logo', 
+                style = 'top:0; padding:12px; width:1000px; height:150px') # Added width and height as CSS
+```
+
+# Introduction
+
+Genomics4All is pleased to present the results obtained from the bioinformatics analysis of shotgun metagenomics sequencing data derived from soil samples collected from potato crops. Taxonomic analysis was conducted on a total of 30 samples, including 5 treatments and control samples. The effects of Mycoup, Mycoup 360, Thydra, Vitasoil, and a combination of Vitasoil and Qlimax were evaluated compared to control samples.
+
+# Experimental design
+
+```{r Sample info, include=FALSE}
+samples_df  <- read_excel("sample_id.METASpatata.xlsx")
+samples_df$ID -> samples_df$id
+# Group column
+samples_df$Group <- paste0(samples_df$Condition)
+```
+
+```{r Loading  data, include=TRUE}
+knitr::kable(samples_df)
+```
+
+
+# Shotgun taxonomy
+
+## Create phyloseq object
+
+Phyloseq object is a specialized data structure in R used for microbiome data analysis. It includes the OTU table (microbial abundance data), sample metadata (information about the samples) and a taxonomy table (classification of taxa).
+
+```{r Create phyloseq object, include=FALSE}
+#Loading the data
+OTU_mat <- read_excel("Taxonomy/P.phyloseq_counts_3_70_all_motus_profile.xlsx", 
+                      sheet = "COUNTS")
+
+tax_mat <-  read_excel("Taxonomy/P.phyloseq_counts_3_70_all_motus_profile.xlsx", 
+                       sheet = "TAX")
+#tax_mat <- as.matrix(tax_mat)
+#define the row names from the ASV column
+OTU_mat <- OTU_mat %>%
+  tibble::column_to_rownames("OTU")
+
+#Idem for the two other matrixes
+tax_mat <- tax_mat %>% 
+  tibble::column_to_rownames("OTU")
+
+samples_df <- samples_df %>% 
+  tibble::column_to_rownames("ID")
+
+#Transform into matrixes ASV and tax tables (sample table can be left as data frame)
+OTU_mat <- as.matrix(OTU_mat)
+tax_mat <- as.matrix(tax_mat)
+class(OTU_mat) <- "numeric"
+
+#Transform to phyloseq objects
+OTU = otu_table(OTU_mat, taxa_are_rows = TRUE)
+TAX = tax_table(tax_mat)
+samples = sample_data(samples_df)
+
+ps <- phyloseq(OTU, TAX, samples)
+```
+
+```{r Create phyloseq object2, include=TRUE}
+ps
+#ntaxa(ps)
+#nsamples(ps)
+#sample_names(ps)
+#rank_names(ps)
+#sample_variables(ps)
+```
+
+
+
+
+## Taxonomic Filtering
+
+In most cases, the organisms within a sample are well represented in the reference database. When this is the case, it’s advisable to filter out reads/ASVs that cannot be assigned a high-rank taxonomy label. These are most likely contaminates/artifacts that don’t exist in nature and should be removed
+
+```{r Filtering object, include=FALSE}
+#we limit the taxa to those from Bacteria, Phylum and Class in not unassigned, and not belonging to the Mitochondria Family
+ps0 = subset_taxa(ps, !is.na(Phylum) & !is.na(Class))  
+
+dat.aglo = tax_glom(ps0, taxrank = "Species", NArm = FALSE)
+
+ps0
+dat.aglo
+
+# Aggregate at genus level.
+# Notice the NArm = TRUE parameter. This will remove anything that is unclassified at genus level. This choice will depend on your research goals.
+
+df_tax <- as.data.frame(tax_table(dat.aglo))
+
+#Remove taxa not seen more than 1 time in at least 10% of the samples. This protects against an OTU with small mean & trivially large C.V.
+
+ps_filtered = filter_taxa(dat.aglo, function(x) sum(x > 1) > (0.1*length(x)), TRUE)
+
+df_tax_table <- as.data.frame(tax_table (ps_filtered))
+
+tax_table_ps_filter <- as.data.frame(tax_table(ps_filtered))
+
+psadd::plot_krona (ps_filtered, "Taxonomy/Shotgun-KRONA", "id")
+
+ps
+ps0
+dat.aglo
+```
+
+```{r Filtering object2, include=TRUE}
+ps_filtered
+```
+
+## Taxonomic Composition (Visualizing relative abundance - Stacked bar plots) {.tabset .tabset-fade .tabset-pills} 
+
+```{r Convert to relative abundance, include=FALSE}
+#Convert to relative abundance
+ps_rel_abund = phyloseq::transform_sample_counts(ps_filtered, function(x){x / sum(x)})
+phyloseq::otu_table(ps_rel_abund)[1:5, 1:5]
+ps_rel_abund
+
+abundance_table <- as.data.frame(phyloseq::otu_table(ps_rel_abund))
+tax_table <- as.data.frame(phyloseq::tax_table(ps_rel_abund))
+abundance_matrix <- as.matrix(abundance_table)
+species_names <- rownames(abundance_matrix)
+combined_data <- cbind(species_names, abundance_matrix, tax_table)
+write.csv(combined_data, file = "Taxonomy/Rel.abund_shot.csv", row.names = TRUE)
+```
+
+
+### Phylum {.tabset .tabset-fade .tabset-pills}
+
+```{r, warning = FALSE, message = FALSE, echo = FALSE, fig.height=8, fig.width=14, dpi=600, include=TRUE}
+dat.aglo = tax_glom(ps_rel_abund, taxrank = "Phylum")
+
+# Extract the sample data
+sample_data_prune <- as.data.frame(sample_data(ps_rel_abund))
+
+# Define the custom order for Condition_Time
+custom_order <- c("Mycoup", "Mycoup 360", "Thydra", "Qlimax + Vitasoil", "Vitasoil", "Control")
+
+# Set the order of the combined Condition and Time factor in the sample data
+sample_data_prune$Group <- factor(sample_data_prune$Group, levels = custom_order)
+
+# Update the sample data in the phyloseq object
+sample_data(dat.aglo) <- sample_data_prune
+
+plot <- plot_bar(dat.aglo, fill = "Phylum") + 
+  geom_bar(aes(color=Phylum, fill=Phylum), stat="identity", position="fill") + 
+  labs(x="Samples", y="Relative abundance", title="Most abundant Phylum") + 
+  facet_grid(~Group, scales="free", space="free_y") + 
+  theme(
+    panel.background = element_rect(fill = "white"),  # Set background color to white
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)  # Rotate x-axis labels vertically
+  )
+print(plot)
+
+# Save the plot as an image
+ggsave("Taxonomy/most_abundant_phylum_plot.png", plot = plot, width = 14, height = 8, dpi = 600)
+```
+
+### Class {.tabset .tabset-fade .tabset-pills}
+
+```{r, warning = FALSE, message = FALSE, echo = FALSE, fig.height=8, fig.width=14, dpi=600, include=TRUE}
+# Top20
+top20 <- names(sort(taxa_sums(ps_rel_abund), decreasing=TRUE)[1:20])
+dat.aglo = tax_glom(ps_rel_abund, taxrank = "Class")
+prune.dat.two = prune_taxa(top20, dat.aglo)
+
+# Extract the sample data
+sample_data_prune <- as.data.frame(sample_data(prune.dat.two))
+
+# Set the order of the combined Condition and Time factor in the sample data
+sample_data_prune$Group <- factor(sample_data_prune$Group, levels = custom_order)
+
+# Update the sample data in the phyloseq object
+sample_data(prune.dat.two) <- sample_data_prune
+
+plot <- plot_bar(prune.dat.two, fill = "Class") + 
+  geom_bar(aes(color=Class, fill=Class), stat="identity", position="fill") + 
+  labs(x="Samples", y="Relative abundance", title="Most abundant Class") + 
+  facet_grid(~Group, scales="free", space="free_y") + 
+  theme(
+    panel.background = element_rect(fill = "white"),  # Set background color to white
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)  # Rotate x-axis labels vertically
+  )
+print(plot)
+
+# Save the plot as an image
+ggsave("Taxonomy/most_abundant_class_plot.png", plot = plot, width = 18, height = 8, dpi = 600)
+```
+
+### Order {.tabset .tabset-fade .tabset-pills}
+
+```{r, Most abundant Order, warning = FALSE, message = FALSE, echo = FALSE, include=TRUE, fig.height=8, fig.width=14, dpi=600}
+# Top20
+top20 <- names(sort(taxa_sums(ps_rel_abund), decreasing=TRUE)[1:20])
+dat.aglo = tax_glom(ps_rel_abund, taxrank = "Order")
+prune.dat.two = prune_taxa(top20, dat.aglo)
+
+# Assuming prune.dat.two is your phyloseq object after pruning
+
+# Extract the sample data
+sample_data_prune <- as.data.frame(sample_data(prune.dat.two))
+
+# Set the order of the combined Condition and Time factor in the sample data
+sample_data_prune$Group <- factor(sample_data_prune$Group, levels = custom_order)
+
+# Update the sample data in the phyloseq object
+sample_data(prune.dat.two) <- sample_data_prune
+
+plot <- plot_bar(prune.dat.two, fill = "Order") + 
+  geom_bar(aes(color=Order, fill=Order), stat="identity", position="fill") + 
+  labs(x="Samples", y="Relative abundance", title="Most abundant Order") + 
+  facet_grid(~Group, scales="free", space="free_y") + 
+  theme(
+    panel.background = element_rect(fill = "white"),  # Set background color to white
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)  # Rotate x-axis labels vertically
+  )
+print(plot)
+
+# Save the plot as an image
+ggsave("Taxonomy/most_abundant_order_plot.png", plot = plot, width = 14, height = 8, dpi = 600)
+```
+
+### Family {.tabset .tabset-fade .tabset-pills}
+
+```{r, Most abundant Family, warning = FALSE, message = FALSE, echo = FALSE, include=TRUE, fig.height=8, fig.width=14, dpi=600}
+# Top20
+top20 <- names(sort(taxa_sums(ps_rel_abund), decreasing=TRUE)[1:20])
+dat.aglo = tax_glom(ps_rel_abund, taxrank = "Family")
+prune.dat.two = prune_taxa(top20, dat.aglo)
+
+# Assuming prune.dat.two is your phyloseq object after pruning
+
+# Extract the sample data
+sample_data_prune <- as.data.frame(sample_data(prune.dat.two))
+
+# Set the order of the combined Condition and Time factor in the sample data
+sample_data_prune$Group <- factor(sample_data_prune$Group, levels = custom_order)
+
+# Update the sample data in the phyloseq object
+sample_data(prune.dat.two) <- sample_data_prune
+
+plot <- plot_bar(prune.dat.two, fill = "Family") + 
+  geom_bar(aes(color=Family, fill=Family), stat="identity", position="fill") + 
+  labs(x="Samples", y="Relative abundance", title="Most abundant Family") + 
+  facet_grid(~Group, scales="free", space="free_y") + 
+  theme(
+    panel.background = element_rect(fill = "white"),  # Set background color to white
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)  # Rotate x-axis labels vertically
+  )
+print(plot)
+
+# Save the plot as an image
+ggsave("Taxonomy/most_abundant_families_plot.png", plot = plot, width = 18, height = 8, dpi = 600)
+```
+
+### Genus {.tabset .tabset-fade .tabset-pills}
+
+```{r, Most abundant Genus, warning = FALSE, message = FALSE, echo = FALSE, include=TRUE, fig.height=6, fig.width=14, dpi=600}
+# Top20
+top20 <- names(sort(taxa_sums(ps_rel_abund), decreasing=TRUE)[1:20])
+dat.aglo = tax_glom(ps_rel_abund, taxrank = "Genus")
+prune.dat.two = prune_taxa(top20, dat.aglo)
+
+# Assuming prune.dat.two is your phyloseq object after pruning
+
+# Extract the sample data
+sample_data_prune <- as.data.frame(sample_data(prune.dat.two))
+
+# Create a new variable "Condition_Time" by combining "Condition" and "Time"
+sample_data_prune$Condition_Time <- factor(paste(sample_data_prune$Condition, sample_data_prune$Rep, sep = " "))
+
+# Set the order of the combined Condition and Time factor in the sample data
+sample_data_prune$Group <- factor(sample_data_prune$Group, levels = custom_order)
+
+# Update the sample data in the phyloseq object
+sample_data(prune.dat.two) <- sample_data_prune
+
+plot <- plot_bar(prune.dat.two, fill = "Genus") + 
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="fill") + 
+  labs(x="Samples", y="Relative abundance", title="Most abundant Genus") + 
+  facet_grid(~Group, scales="free", space="free_y") + 
+  theme(
+    panel.background = element_rect(fill = "white"),  # Set background color to white
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)  # Rotate x-axis labels vertically
+  )
+print(plot)
+
+# Save the plot as an image
+ggsave("Taxonomy/most_abundant_genus_plot.png", plot = plot, width = 18, height = 8, dpi = 600)
+```
+
+### Species {.tabset .tabset-fade .tabset-pills}
+
+```{r, Most abundant Species, warning = FALSE, message = FALSE, echo = FALSE, include=TRUE, fig.height=6, fig.width=14, dpi=600}
+# Top20
+top20 <- names(sort(taxa_sums(ps_rel_abund), decreasing=TRUE)[1:20])
+dat.aglo = tax_glom(ps_rel_abund, taxrank = "Species")
+prune.dat.two = prune_taxa(top20, dat.aglo)
+
+# Assuming prune.dat.two is your phyloseq object after pruning
+
+# Extract the sample data
+sample_data_prune <- as.data.frame(sample_data(prune.dat.two))
+
+# Create a new variable "Condition_Time" by combining "Condition" and "Time"
+sample_data_prune$Condition_Time <- factor(paste(sample_data_prune$Condition, sample_data_prune$Rep, sep = " "))
+
+# Set the order of the combined Condition and Time factor in the sample data
+sample_data_prune$Group <- factor(sample_data_prune$Group, levels = custom_order)
+
+# Update the sample data in the phyloseq object
+sample_data(prune.dat.two) <- sample_data_prune
+
+# Create the plot with the specified order
+plot <- plot_bar(prune.dat.two, fill = "Species") + 
+  geom_bar(aes(color=Species, fill=Species), stat="identity", position="fill") + 
+  labs(x="Samples", y="Relative abundance", title="Most abundant Species") + 
+  facet_grid(~Group, scales="free", space="free_y") + 
+  theme(
+    panel.background = element_rect(fill = "white"),  # Set background color to white
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)  # Rotate x-axis labels vertically
+  )
+
+# Print the plot
+print(plot)
+
+# Save the plot as an image
+ggsave("Taxonomy/most_abundant_species_plot.png", plot = plot, width = 18, height = 8, dpi = 600)
+```
+
+## Alpha Diversity  {.tabset .tabset-fade .tabset-pills} 
+
+Alpha diversity measures within-sample diversity and looks at how many taxa are observed, as well as how evenly they are distributed.
+
+###  Rarefaction curves  {.tabset .tabset-fade .tabset-pills}
+
+In this study, rarefaction curves were utilized to depict the relationship between sequencing depth and the number of observed species. This graphical representation allows an assessment of whether the sampling effort is sufficient to capture the diversity within the microbial community. The curve visually illustrates how the number of species increases with additional sequencing, providing insights into the comprehensiveness of the sampling strategy.
+
+```{r, warning = FALSE, message = FALSE, echo = FALSE, include=FALSE}
+#p <- ggrare(ps, step = 1000, color = "Condition", label = "id", se = FALSE)
+#p + theme(panel.background = element_rect(fill = "white"))
+
+p <- ggrare(ps_filtered, step = 1000, color = "Group", label = "id", se = FALSE) + theme_minimal() 
+
+#Normalize number of reads in each sample using median sequencing depth.
+total = median(sample_sums(ps_filtered))
+standf = function(x, t=total) round(t * (x / sum(x)))
+ps_filtered_norm = transform_sample_counts(ps_filtered, standf)
+
+p <- ggrare(ps_filtered_norm, step = 1000, color = "Group", label = "id", se = FALSE) + theme_minimal() 
+```
+
+```{r, warning = FALSE, message = FALSE, echo = FALSE, fig.width=25, fig.height=10, include=TRUE}
+print(p)
+```
+### Diversity metric {.tabset .tabset-fade .tabset-pills}
+
+Common alpha diversity statistics include:
+  
+Chao1 is a richness estimator emphasizing the importance of rare species. It estimates the total number of species, including those that are rare or infrequently sampled.
+
+The Shannon diversity index measures the difficulty of predicting the identity of a randomly chosen individual. It takes into account both the number of species (richness) and their relative abundance (evenness), providing a comprehensive measure of diversity.
+
+Simpsons index represents the probability that two randomly chosen individuals are the same species. It ranges from 0 to 1, where higher values indicate lower diversity and dominance of one or a few species.
+
+The ACE estimates species richness by considering both rare and common species, providing a valuable measure to capture the total richness of a community.
+
+Chao1 and ACE provide estimates of species richness. Chao1 may be more sensitive to rare species, while ACE considers abundance. Shannon accounts for both richness and evenness, while Simpson focuses on evenness.
+
+```{r, warning = FALSE, message = FALSE, echo = FALSE,fig.height=12, fig.width=20, dpi=600}
+rich = estimate_richness(ps_filtered_norm)
+rich
+# Complete plots for comparison
+p <- plot_richness(ps_filtered_norm, x="id", color="Group")
+p <- p + theme_minimal() + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+print(p)
+#plot_richness(ps_filtered, x="id", color="Condition")
+#plot_richness(ps, x="id", color="Condition")
+```
+
+The observed diversity analysis indicates that Mycoup 360, Thydra and Vitasoil groups share similar observed diversity to the control. Mycoup shows large differences in richness among the replicates and Qlimax + Vitasoil reduced richness compared to the other groups.
+
+```{r, warning = FALSE, message = FALSE, echo = FALSE}
+# Estimate richness
+alpha_div <- estimate_richness(ps_filtered_norm, measures = "Observed")
+
+# Merge alpha diversity with metadata
+alpha_div_with_metadata <- merge(alpha_div, sample_data(ps_filtered_norm), by = "row.names")
+
+# Define the custom order for conditions
+custom_order <- c("Mycoup", "Mycoup 360", "Thydra", "Qlimax + Vitasoil", "Vitasoil", "Control")
+
+# Add a column for the condition (treatment/control) with custom order
+alpha_div_with_metadata$Group <- factor(sample_data_prune$Group, levels = custom_order)
+
+alpha_div_plot <- ggplot(alpha_div_with_metadata, aes(x = interaction(Group), y = Observed, fill = Group)) +
+  geom_boxplot() +
+  labs(x = "Condition:Timepoint", y = "Observed Diversity") +
+  ggtitle("Alpha Diversity by Condition") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  # Rotate x-axis labels for better visibility
+
+# Print the plot
+print(alpha_div_plot)
+
+ggsave("Taxonomy/observed_diversity_plot.png", plot = alpha_div_plot, width = 10, height = 8, dpi = 600, bg = "white")
+```
+
+Shannon diversity analysis suggests that all groups, except for Mycoup, have a higher overall diversity of species and a more even distribution of abundances within their communities compared to the Control group.
+
+```{r, warning = FALSE, message = FALSE, echo = FALSE}
+# Estimate richness
+alpha_div <- estimate_richness(ps_filtered_norm, measures = "Shannon")
+
+alpha_div_with_metadata <- merge(alpha_div, sample_data(ps_filtered_norm), by = "row.names")
+
+# Add a column for the condition (treatment/control) with custom order
+alpha_div_with_metadata$Group <- factor(sample_data_prune$Group, levels = custom_order)
+
+alpha_div_plot <- ggplot(alpha_div_with_metadata, aes(x = interaction(Group), y = Shannon, fill = Group)) +
+  geom_boxplot() +
+  labs(x = "Condition:Timepoint", y = "Shannon Diversity") +
+  ggtitle("Alpha Diversity by Condition") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 12))  # Rotate x-axis labels for better visibility
+
+# Print the plot
+print(alpha_div_plot)
+
+# Save the plot as an image
+ggsave("shannon_diversity_plot.png", plot = alpha_div_plot, width = 10, height = 8, dpi = 600, bg = "white")
+```
+
+Chao1 diversity analysis suggests a potential underestimation of species richness in all groups. However, in Mycoup and Qlimax + Vitasoil could potentially have a higher diversity than what is being observed directly from the sampled data.
+
+```{r, warning = FALSE, message = FALSE, echo = FALSE}
+# Estimate richness
+alpha_div <- estimate_richness(ps_filtered_norm, measures = "Chao1")
+
+alpha_div_with_metadata <- merge(alpha_div, sample_data(ps_filtered_norm), by = "row.names")
+
+# Add a column for the condition (treatment/control) with custom order
+alpha_div_with_metadata$Group <- factor(sample_data_prune$Group, levels = custom_order)
+
+alpha_div_plot <- ggplot(alpha_div_with_metadata, aes(x = interaction(Group), y = Chao1, fill = Group)) +
+  geom_boxplot() +
+  labs(x = "Condition:Timepoint", y = "Chao1 Diversity") +
+  ggtitle("Alpha Diversity by Condition and Timepoint") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  # Rotate x-axis labels for better visibility
+
+# Print the plot
+print(alpha_div_plot)
+
+ggsave("Taxonomy/chao1_diversity_plot.png", plot = alpha_div_plot, width = 10, height = 8, dpi = 600, bg = "white")
+```
+
+
+Simpson diversity results suggest that the community in the Control is relatively low in diversity. This is also seen in Mycoup and Mycoup 360. The higher values in Qlimax + Vitasoil, Thydra and Vitasoil indicate an even more dominant or less diverse community.
+
+```{r, warning = FALSE, message = FALSE, echo = FALSE}
+alpha_div <- estimate_richness(ps_filtered_norm, measures = "Simpson")
+
+alpha_div_with_metadata <- merge(alpha_div, sample_data(ps_filtered_norm), by = "row.names")
+
+# Add a column for the condition (treatment/control) with custom order
+alpha_div_with_metadata$Group <- factor(sample_data_prune$Group, levels = custom_order)
+
+alpha_div_plot <- ggplot(alpha_div_with_metadata, aes(x = interaction(Group), y = Simpson, fill = Group)) +
+  geom_boxplot() +
+  labs(x = "Condition:Timepoint", y = "Simpson Diversity") +
+  ggtitle("Alpha Diversity by Condition and Timepoint") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  # Rotate x-axis labels for better visibility
+
+# Print the plot
+print(alpha_div_plot)
+
+ggsave("Taxonomy/simpson_diversity_plot.png", plot = alpha_div_plot, width = 10, height = 8, dpi = 600, bg = "white")
+```
+
+ACE results indicate that in Mycoup 360, Thydra, Qlimax + Vitasoil and Vitasoil groups the estimated species richness is comparatively reduced. This could be due to factors such as lower abundance of certain species or a higher dominance of a few species.
+
+```{r, warning = FALSE, message = FALSE, echo = FALSE}
+# Estimate richness
+alpha_div <- estimate_richness(ps_filtered_norm, measures = "ACE")
+
+alpha_div_with_metadata <- merge(alpha_div, sample_data(ps_filtered_norm), by = "row.names")
+
+# Add a column for the condition (treatment/control) with custom order
+alpha_div_with_metadata$Group <- factor(sample_data_prune$Group, levels = custom_order)
+
+alpha_div_plot <- ggplot(alpha_div_with_metadata, aes(x = interaction(Group), y = ACE, fill = Group)) +
+  geom_boxplot() +
+  labs(x = "Condition:Timepoint", y = "ACE Diversity") +
+  ggtitle("Alpha Diversity by Condition and Timepoint") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  # Rotate x-axis labels for better visibility
+
+# Print the plot
+print(alpha_div_plot)
+
+ggsave("Taxonomy/ace_diversity_plot.png", plot = alpha_div_plot, width = 10, height = 8, dpi = 600, bg = "white")
+```
+
+## Beta Diversity {.tabset .tabset-fade .tabset-pills}
+
+Beta diversity measures the variation in species composition between different locations or samples within an ecosystem.
+
+# Beta Diversity {.tabset .tabset-fade .tabset-pills}
+
+Beta diversity measures the variation in species composition between different locations or samples within an ecosystem.
+
+## Beta Diversity with Normalized Counts using median sequencing depth.{.tabset .tabset-fade .tabset-pills}
+
+Beta diversity was explored using normalized counts and the median sequencing depth as a basis. The data underwent Principal Coordinate Analysis (PCoA) employing the Bray-Curtis Dissimilarity method, a measure widely used to assess compositional differences in microbial communities. Each point in the plot corresponds to a sample, and the distance between points reflects the dissimilarity in microbial community structure.
+
+```{r, warning = FALSE, message = FALSE, echo = FALSE}
+# Principal Coordinate Analysis (PCoA) with Bray-Curtis Dissimilarity:
+# Replace "SampleToRemove" with the actual sample name you want to remove
+ps_norm_edited <- prune_samples(sample_names(ps_filtered_norm) != "S03s", ps_filtered_norm)
+
+samples_df <- sample_data(ps_norm_edited)
+bray_dist_norm <- phyloseq::distance(ps_norm_edited, method="bray", weighted=TRUE)
+ordination_norm <- ordinate(ps_norm_edited, method="PCoA", distance=bray_dist_norm)
+
+### Plot PCoA for Normalized Counts
+plot_ordination(ps_norm_edited, ordination_norm, color="Condition", shape = "Condition") +
+  theme(aspect.ratio=1) +
+  geom_text(aes(label=rownames(samples_df))) +
+  labs(title = "PCoA [Bray-Curtis index] - Normalized Counts") +
+  theme_minimal()
+
+# PCoA with Relative Proportions (Transformed Data) {.tabset .tabset-fade .tabset-pills}
+
+# Transform data (raw counts) to relative proportions for Bray-Curtis distances
+bray.dat <- transform_sample_counts(ps_norm_edited, function(x) x/sum(x))
+bray_dist_rel <- phyloseq::distance(bray.dat, method="bray")
+ordination_rel <- ordinate(bray.dat , method="PCoA", distance=bray_dist_rel)
+
+# Plot PCoA for Relative Proportions
+p <- plot_ordination(bray.dat, ordination_rel, color="Condition",  shape="Condition") + theme(aspect.ratio=1)
+
+# Additional PCoA customization
+p<- p + labs(title = "PCoA [Bray-Curtis index] - Relative Proportions", x = "PC1[18.9%]", y = "PC2[13.3%]") + geom_point(size=3) + theme_minimal()
+
+print(p)
+```
+### Hierarchical clustering {.tabset .tabset-fade .tabset-pills}
+
+Beta diversity was assessed using the DESeq2 package, a powerful tool for differential abundance analysis in microbiome studies. A variance-stabilized transformation was applied to the data to ensure the homogeneity of variances. Hierarchical clustering based on Euclidean distance was employed to explore the dissimilarity patterns among samples. The resulting dendrogram visually represents the relationships between samples, with branches indicating similarities in microbial composition. The clustering was also conducted using "ward.D2" method, providing alternative perspectives on the beta diversity patterns.
+
+```{r, warning = FALSE, message = FALSE, echo = FALSE}
+# now converting our phyloseq object to a deseq object
+ps_dds <- phyloseq_to_deseq2(ps_norm_edited, ~Group)
+
+# and running deseq standard analysis:
+ps_dds <- DESeq(ps_dds)
+
+# geometric mean, set to zero when all coordinates are zero
+geo_mean_protected <- function(x) {
+  if (all(x == 0)) {
+    return (0)
+  }
+  exp(mean(log(x[x != 0])))
+}
+
+geoMeans <- apply(counts(ps_dds), 1, geo_mean_protected)
+ps_dds <- estimateSizeFactors(ps_dds, geoMeans = geoMeans)
+ps_dds <- estimateDispersions(ps_dds)
+abund <- getVarianceStabilizedData(ps_dds)
+
+euc_dist <- dist(t(abund))
+euc_clust <- hclust(euc_dist, method="ward.D2")
+euc_dend <- as.dendrogram(euc_clust, hang=0.1)
+dend_cols <- as.character(samples_df$color_tto[order.dendrogram(euc_dend)])
+labels_colors(euc_dend) <- dend_cols
+plot(euc_dend, ylab="VST Euc. dist. by Condition. Method ward.D2")
+
+euc_dist <- dist(t(abund), method="euclidean")
+euc_clust <- hclust(euc_dist, method="ward.D")
+euc_dend <- as.dendrogram(euc_clust)
+dend_cols <- as.character(samples_df$color_tto[order.dendrogram(euc_dend)])
+labels_colors(euc_dend) <- dend_cols
+plot(euc_dend, ylab="VST Euc. dist. by Condition. Method euclidean")
+```
+
+### Principal coordinate analysis (PCoA) of Bray-Curtis distances {.tabset .tabset-fade .tabset-pills}
+
+Principal Coordinate Analysis (PCoA) with transformed data using DESeq2 and a variance-stabilized transformation (VST). This approach, commonly applied in microbiome studies, mitigates biases introduced by varying sequencing depths and stabilizes variances across samples. The resulting PCoA plot visually represents dissimilarity patterns among samples in a two-dimensional space, utilizing Bray-Curtis distances. Each point represents a sample, and color-coded shapes denote experimental conditions.
+
+```{r, warning = FALSE, message = FALSE, echo = FALSE}
+set.seed (130686)
+# making our phyloseq object with transformed table
+vst_count_phy <- otu_table(abund, taxa_are_rows=T)
+sample_info_tab_phy <- sample_data(samples_df)
+vst_physeq <- phyloseq(vst_count_phy, sample_info_tab_phy)
+
+# generating and visualizing the PCoA with phyloseq
+vst_pcoa <- ordinate(vst_physeq, method="PCoA", distance="bray")
+eigen_vals <- vst_pcoa$values$Eigenvalues # allows us to scale the axes according to their magnitude of separating apart the samples
+p <- plot_ordination(vst_physeq, vst_pcoa, color="Condition" ,  shape="Condition") + theme(aspect.ratio=1) 
+
+# Customizing PCoA plot
+p + geom_text(aes(label=rownames(samples_df), hjust=0.3, vjust=-0.4)) +labs(title = paste("ShotGun analysis - DESeq2 Transformation","PCoA [Bray-Curtis index]", sep = "\n"), x = "PC1[13%]", y = "PC2[11.3%]")
+p <- p  + geom_point(size=5) +labs(title = paste("ShotGun analysis - DESeq2 Transformation","PCoA [Bray-Curtis index]", sep = "\n"), x = "PC1[13%]", y = "PC2[11.3%]") +theme_minimal()
+print (p)
+ggsave("Taxonomy/beta_diversity_plot.png", plot = p, width = 10, height = 8, dpi = 600, bg = "white")
+```
+
+# DESEQ2
+
+DESeq2 is used to examine differences in microbial abundance across various experimental conditions. With the help of the Wald test, we can identify specific groups of microbes that exhibit significant changes in abundance. The resulting volcano plots visually highlight these impactful microbial variations, offering a clear understanding of how experimental factors influence the entire microbial community.
+
+The volcano plots illustrate the species that exhibit the highest significance, characterized by a p-value less than 0.05 and a log2 fold change of 2. A complete list of all species that exhibit significant differences, along with their corresponding statistical values, is also provided.
+
+## Mycoup vs. Control
+
+```{r echo=FALSE, fig.height=6, fig.width=15, message=FALSE, warning=FALSE, paged.print=FALSE}
+PS_FILTERED_SUBSET <- subset_samples(ps_filtered, Condition=="Mycoup" | Condition=="Control")
+
+res <-difftest(PS_FILTERED_SUBSET, group= "Condition", ref = "Control")
+
+write.table(res,"results_deseq2_Mycoup_vs_Control.txt", sep = "\t", quote = F) 
+
+filtered_res <- subset(res, baseMean > 2)
+                       
+a<-plotdiff(filtered_res, level="Species", pvalue = 0.05 , log2FC = 2, size = 3) + geom_hline(yintercept = 0, linetype="dotted") + geom_point(size = 6) +
+  labs(y = "\nLog2 Fold-Change for Mycoup vs. Control [p.value = 0.05 , log2FC = ±2]", x = "Species") +
+  theme(axis.text.x = element_text(color = "black", size = 12),
+        axis.text.y = element_text(color = "black", size = 18),
+        axis.title.y = element_text(size = 14),
+        axis.title.x = element_text(size = 16),
+        legend.text = element_text(size = 12),
+        legend.title = element_text(size = 12)) +
+  scale_x_discrete(labels = function(x) gsub("\\(.*\\)", "", x)) +
+  geom_hline(yintercept = 0, linetype="dotted") +
+  ggtitle("Mycoup vs. Control") +
+  theme(plot.title = element_text(size = 18))  
+
+res_signi_Mycoup_vs_Control <- filtered_res %>% filter (filtered_res$Significant=="Yes")
+
+write.table(res_signi_Mycoup_vs_Control,"results_deseq2_Mycoup_vs_Control.signif_pvalue.txt", sep = "\t", quote = F) 
+
+DT::datatable(res_signi_Mycoup_vs_Control)
+
+ggsave("Taxonomy/Mycoup_vs_Control_plot.png", plot = a, width = 12, height = 8, dpi = 600, bg = "white")
+```
+
+
+## Mycoup 360 vs. Control
+
+```{r echo=FALSE, fig.height=6, fig.width=15, message=FALSE, warning=FALSE, paged.print=FALSE}
+PS_FILTERED_SUBSET <- subset_samples(ps_filtered, Condition=="Mycoup 360" | Condition=="Control")
+
+res <-difftest(PS_FILTERED_SUBSET, group= "Condition", ref = "Control")
+
+write.table(res,"results_deseq2_Mycoup360_vs_Control.txt", sep = "\t", quote = F) 
+
+filtered_res <- subset(res, baseMean > 2)
+
+b<-plotdiff(filtered_res, level="Species", pvalue = 0.05 , log2FC = 2, size = 3) + geom_hline(yintercept = 0, linetype="dotted") + geom_point(size = 6) +
+  labs(y = "\nLog2 Fold-Change for Mycoup 360 vs. Control [p.value = 0.05 , log2FC = ±2]", x = "Species") +
+  theme(axis.text.x = element_text(color = "black", size = 12),
+        axis.text.y = element_text(color = "black", size = 18),
+        axis.title.y = element_text(size = 14),
+        axis.title.x = element_text(size = 16),
+        legend.text = element_text(size = 12),
+        legend.title = element_text(size = 12)) +
+  scale_x_discrete(labels = function(x) gsub("\\(.*\\)", "", x)) +
+  geom_hline(yintercept = 0, linetype="dotted") +
+  ggtitle("Mycoup 360 vs. Control") +
+  theme(plot.title = element_text(size = 18))  
+
+res_signi_Mycoup360_vs_Control <- filtered_res %>% filter (filtered_res$Significant=="Yes")
+
+write.table(res_signi_Mycoup360_vs_Control,"results_deseq2_Mycoup360_vs_Control.signif_pvalue.txt", sep = "\t", quote = F) 
+
+DT::datatable(res_signi_Mycoup360_vs_Control)
+
+ggsave("Taxonomy/Mycoup360_vs_Control_plot.png", plot = b, width = 12, height = 8, dpi = 600, bg = "white")
+```
+
+## Thydra vs. Control
+
+```{r echo=FALSE, fig.height=6, fig.width=15, message=FALSE, warning=FALSE, paged.print=FALSE}
+PS_FILTERED_SUBSET <- subset_samples(ps_filtered, Condition=="Thydra" | Condition=="Control")
+
+res <-difftest(PS_FILTERED_SUBSET, group= "Condition", ref = "Control")
+
+write.table(res,"results_deseq2_Thydra_vs_Control.txt", sep = "\t", quote = F) 
+
+filtered_res <- subset(res, baseMean > 2)
+
+c<-plotdiff(filtered_res, level="Species", pvalue = 0.05 , log2FC = 2, size = 3) + geom_hline(yintercept = 0, linetype="dotted") + geom_point(size = 6) +
+  labs(y = "\nLog2 Fold-Change for Thydra vs. Control [p.value = 0.05 , log2FC = ±2]", x = "Species") +
+  theme(axis.text.x = element_text(color = "black", size = 12),
+        axis.text.y = element_text(color = "black", size = 18),
+        axis.title.y = element_text(size = 14),
+        axis.title.x = element_text(size = 16),
+        legend.text = element_text(size = 12),
+        legend.title = element_text(size = 12)) +
+  scale_x_discrete(labels = function(x) gsub("\\(.*\\)", "", x)) +
+  geom_hline(yintercept = 0, linetype="dotted") +
+  ggtitle("Thydra vs. Control") +
+  theme(plot.title = element_text(size = 18))  
+
+res_signi_Thydra_vs_Control <- filtered_res %>% filter (filtered_res$Significant=="Yes")
+
+write.table(res_signi_Thydra_vs_Control,"results_deseq2_Thydra_vs_Control.signif_pvalue.txt", sep = "\t", quote = F) 
+
+DT::datatable(res_signi_Thydra_vs_Control)
+
+ggsave("Taxonomy/Thydra_vs_Control_plot.png", plot = c, width = 12, height = 8, dpi = 600, bg = "white")
+```
+
+## Qlimax + Vitasoil vs. Control
+
+```{r echo=FALSE, fig.height=6, fig.width=15, message=FALSE, warning=FALSE, paged.print=FALSE}
+PS_FILTERED_SUBSET <- subset_samples(ps_filtered, Condition=="Qlimax + Vitasoil" | Condition=="Control")
+
+res <-difftest(PS_FILTERED_SUBSET, group= "Condition", ref = "Control")
+
+write.table(res,"results_deseq2_QlimaxVitasoil_vs_Control.txt", sep = "\t", quote = F) 
+
+filtered_res <- subset(res, baseMean > 2)
+
+d<-plotdiff(filtered_res, level="Species", pvalue = 0.05 , log2FC = 2, size = 3) + geom_hline(yintercept = 0, linetype="dotted") + geom_point(size = 6) +
+  labs(y = "\nLog2 Fold-Change for Qlimax + Vitasoil vs. Control [p.value = 0.05 , log2FC = ±2]", x = "Species") +
+  theme(axis.text.x = element_text(color = "black", size = 12),
+        axis.text.y = element_text(color = "black", size = 18),
+        axis.title.y = element_text(size = 14),
+        axis.title.x = element_text(size = 16),
+        legend.text = element_text(size = 12),
+        legend.title = element_text(size = 12)) +
+  scale_x_discrete(labels = function(x) gsub("\\(.*\\)", "", x)) +
+  geom_hline(yintercept = 0, linetype="dotted") +
+  ggtitle("Qlimax + Vitasoil vs. Control") +
+  theme(plot.title = element_text(size = 18))  
+
+res_signi_QlimaxVitasoil_vs_Control <- filtered_res %>% filter (filtered_res$Significant=="Yes")
+
+write.table(res_signi_QlimaxVitasoil_vs_Control,"results_deseq2_QlimaxVitasoil_vs_Control.signif_pvalue.txt", sep = "\t", quote = F) 
+
+DT::datatable(res_signi_QlimaxVitasoil_vs_Control)
+
+ggsave("Taxonomy/QlimaxVitasoil_vs_Control_plot.png", plot = d, width = 12, height = 8, dpi = 600, bg = "white")
+```
+
+## Vitasoil vs. Control
+
+```{r echo=FALSE, fig.height=6, fig.width=15, message=FALSE, warning=FALSE, paged.print=FALSE}
+PS_FILTERED_SUBSET <- subset_samples(ps_filtered, Condition=="Vitasoil" | Condition=="Control")
+
+res <-difftest(PS_FILTERED_SUBSET, group= "Condition", ref = "Control")
+
+write.table(res,"results_deseq2_Vitasoil_vs_Control.txt", sep = "\t", quote = F) 
+
+filtered_res <- subset(res, baseMean > 2)
+
+e<-plotdiff(filtered_res, level="Species", pvalue = 0.05 , log2FC = 2, size = 3) + geom_hline(yintercept = 0, linetype="dotted") + geom_point(size = 6) +
+  labs(y = "\nLog2 Fold-Change for Vitasoil vs. Control [p.value = 0.05 , log2FC = ±2]", x = "Species") +
+  theme(axis.text.x = element_text(color = "black", size = 12),
+        axis.text.y = element_text(color = "black", size = 18),
+        axis.title.y = element_text(size = 14),
+        axis.title.x = element_text(size = 16),
+        legend.text = element_text(size = 12),
+        legend.title = element_text(size = 12)) +
+  scale_x_discrete(labels = function(x) gsub("\\(.*\\)", "", x)) +
+  geom_hline(yintercept = 0, linetype="dotted") +
+  ggtitle("Vitasoil vs. Control") +
+  theme(plot.title = element_text(size = 18))  
+
+res_signi_Vitasoil_vs_Control <- filtered_res %>% filter (filtered_res$Significant=="Yes")
+
+write.table(res_signi_Vitasoil_vs_Control,"results_deseq2_Vitasoil_vs_Control.signif_pvalue.txt", sep = "\t", quote = F) 
+
+DT::datatable(res_signi_Vitasoil_vs_Control)
+
+ggsave("Taxonomy/Vitasoil_vs_Control_plot.png", plot = e, width = 12, height = 8, dpi = 600, bg = "white")
+```
+
+## Mycoup vs. Vitasoil
+
+```{r echo=FALSE, fig.height=6, fig.width=15, message=FALSE, warning=FALSE, paged.print=FALSE, include=FALSE}
+PS_FILTERED_SUBSET <- subset_samples(ps_filtered, Condition=="Mycoup" | Condition=="Vitasoil")
+
+res <-difftest(PS_FILTERED_SUBSET, group= "Condition", ref = "Vitasoil")
+
+write.table(res,"results_deseq2_Mycoup_vs_Vitasoil.txt", sep = "\t", quote = F) 
+
+filtered_res <- subset(res, baseMean > 2)
+
+g<-plotdiff(filtered_res, level="Species", pvalue = 0.05 , log2FC = 2, size = 3) + geom_hline(yintercept = 0, linetype="dotted") + geom_point(size = 6) +
+  labs(y = "\nLog2 Fold-Change for Mycoup vs. Vitasoil [p.value = 0.05 , log2FC = ±2]", x = "Species") +
+  theme(axis.text.x = element_text(color = "black", size = 12),
+        axis.text.y = element_text(color = "black", size = 18),
+        axis.title.y = element_text(size = 14),
+        axis.title.x = element_text(size = 16),
+        legend.text = element_text(size = 12),
+        legend.title = element_text(size = 12)) +
+  scale_x_discrete(labels = function(x) gsub("\\(.*\\)", "", x)) +
+  geom_hline(yintercept = 0, linetype="dotted") +
+  ggtitle("Mycoup vs. Vitasoil") +
+  theme(plot.title = element_text(size = 18))  
+
+res_signi_Mycoup_vs_Vitasoil <- filtered_res %>% filter (filtered_res$Significant=="Yes")
+
+write.table(res_signi_Mycoup_vs_Vitasoil,"results_deseq2_Mycoup_vs_Vitasoil.signif_pvalue.txt", sep = "\t", quote = F) 
+
+DT::datatable(res_signi_Mycoup_vs_Vitasoil)
+
+ggsave("Taxonomy/Mycoup_vs_Vitasoil_plot.png", plot = g, width = 12, height = 8, dpi = 600, bg = "white")
+```
+## Mycoup 360 vs. Vitasoil
+
+```{r echo=FALSE, fig.height=6, fig.width=15, message=FALSE, warning=FALSE, paged.print=FALSE, include=FALSE}
+PS_FILTERED_SUBSET <- subset_samples(ps_filtered, Condition=="Mycoup 360" | Condition=="Vitasoil")
+
+res <-difftest(PS_FILTERED_SUBSET, group= "Condition", ref = "Vitasoil")
+
+write.table(res,"results_deseq2_Mycoup360_vs_Vitasoil.txt", sep = "\t", quote = F) 
+
+filtered_res <- subset(res, baseMean > 2)
+
+h<-plotdiff(filtered_res, level="Species", pvalue = 0.05 , log2FC = 2, size = 3) + geom_hline(yintercept = 0, linetype="dotted") + geom_point(size = 6) +
+  labs(y = "\nLog2 Fold-Change for Mycoup 360 vs. Vitasoil [p.value = 0.05 , log2FC = ±2]", x = "Species") +
+  theme(axis.text.x = element_text(color = "black", size = 12),
+        axis.text.y = element_text(color = "black", size = 18),
+        axis.title.y = element_text(size = 14),
+        axis.title.x = element_text(size = 16),
+        legend.text = element_text(size = 12),
+        legend.title = element_text(size = 12)) +
+  scale_x_discrete(labels = function(x) gsub("\\(.*\\)", "", x)) +
+  geom_hline(yintercept = 0, linetype="dotted") +
+  ggtitle("Mycoup 360 vs. Vitasoil") +
+  theme(plot.title = element_text(size = 18))  
+
+res_signi_Mycoup360_vs_Vitasoil <- filtered_res %>% filter (filtered_res$Significant=="Yes")
+
+write.table(res_signi_Mycoup360_vs_Vitasoil,"results_deseq2_Mycoup360_vs_Vitasoil.signif_pvalue.txt", sep = "\t", quote = F) 
+
+DT::datatable(res_signi_Mycoup360_vs_Vitasoil)
+
+ggsave("Taxonomy/Mycoup360_vs_Vitasoil_plot.png", plot = h, width = 12, height = 8, dpi = 600, bg = "white")
+```
+## Thydra vs. Vitasoil
+
+```{r echo=FALSE, fig.height=6, fig.width=15, message=FALSE, warning=FALSE, paged.print=FALSE, include=FALSE}
+PS_FILTERED_SUBSET <- subset_samples(ps_filtered, Condition=="Thydra" | Condition=="Vitasoil")
+
+res <-difftest(PS_FILTERED_SUBSET, group= "Condition", ref = "Vitasoil")
+
+write.table(res,"results_deseq2_Thydra_vs_Vitasoil.txt", sep = "\t", quote = F) 
+
+filtered_res <- subset(res, baseMean > 2)
+
+i<-plotdiff(filtered_res, level="Species", pvalue = 0.05 , log2FC = 2, size = 3) + geom_hline(yintercept = 0, linetype="dotted") + geom_point(size = 6) +
+  labs(y = "\nLog2 Fold-Change for Thydra vs. Vitasoil [p.value = 0.05 , log2FC = ±2]", x = "Species") +
+  theme(axis.text.x = element_text(color = "black", size = 12),
+        axis.text.y = element_text(color = "black", size = 18),
+        axis.title.y = element_text(size = 14),
+        axis.title.x = element_text(size = 16),
+        legend.text = element_text(size = 12),
+        legend.title = element_text(size = 12)) +
+  scale_x_discrete(labels = function(x) gsub("\\(.*\\)", "", x)) +
+  geom_hline(yintercept = 0, linetype="dotted") +
+  ggtitle("Thydra vs. Vitasoil") +
+  theme(plot.title = element_text(size = 18))  
+
+res_signi_Thydra_vs_Vitasoil <- filtered_res %>% filter (filtered_res$Significant=="Yes")
+
+write.table(res_signi_Thydra_vs_Vitasoil,"results_deseq2_Thydra_vs_Vitasoil.signif_pvalue.txt", sep = "\t", quote = F) 
+
+DT::datatable(res_signi_Thydra_vs_Vitasoil)
+
+ggsave("Taxonomy/Thydra_vs_Vitasoil_plot.png", plot = i, width = 12, height = 8, dpi = 600, bg = "white")
+```
+
+## Qlimax + Vitasoil vs. Vitasoil
+
+```{r echo=FALSE, fig.height=6, fig.width=15, message=FALSE, warning=FALSE, paged.print=FALSE, include=FALSE}
+PS_FILTERED_SUBSET <- subset_samples(ps_filtered, Condition=="Qlimax + Vitasoil" | Condition=="Vitasoil")
+
+res <-difftest(PS_FILTERED_SUBSET, group= "Condition", ref = "Vitasoil")
+
+write.table(res,"results_deseq2_QlimaxVitasoil_vs_Vitasoil.txt", sep = "\t", quote = F) 
+
+filtered_res <- subset(res, baseMean > 2)
+
+j<-plotdiff(filtered_res, level="Species", pvalue = 0.05 , log2FC = 1, size = 3) + geom_hline(yintercept = 0, linetype="dotted") + geom_point(size = 6) +
+  labs(y = "\nLog2 Fold-Change for Qlimax + Vitasoil vs. Vitasoil [p.value = 0.05 , log2FC = ±1]", x = "Species") +
+  theme(axis.text.x = element_text(color = "black", size = 12),
+        axis.text.y = element_text(color = "black", size = 18),
+        axis.title.y = element_text(size = 14),
+        axis.title.x = element_text(size = 16),
+        legend.text = element_text(size = 12),
+        legend.title = element_text(size = 12)) +
+  scale_x_discrete(labels = function(x) gsub("\\(.*\\)", "", x)) +
+  geom_hline(yintercept = 0, linetype="dotted") +
+  ggtitle("Qlimax + Vitasoil vs. Vitasoil") +
+  theme(plot.title = element_text(size = 18))  
+
+res_signi_QlimaxVitasoil_vs_Vitasoil <- filtered_res %>% filter (filtered_res$Significant=="Yes")
+
+write.table(res_signi_QlimaxVitasoil_vs_Vitasoil,"results_deseq2_QlimaxVitasoil_vs_Vitasoil.signif_pvalue.txt", sep = "\t", quote = F) 
+
+DT::datatable(res_signi_QlimaxVitasoil_vs_Vitasoil)
+
+ggsave("Taxonomy/QlimaxVitasoil_vs_Vitasoil_plot.png", plot = j, width = 12, height = 8, dpi = 600, bg = "white")
+```
+
+## Mycoup 360 vs. Mycoup
+
+```{r echo=FALSE, fig.height=6, fig.width=15, message=FALSE, warning=FALSE, paged.print=FALSE, include=FALSE}
+PS_FILTERED_SUBSET <- subset_samples(ps_filtered, Condition=="Mycoup 360" | Condition=="Mycoup")
+
+res <-difftest(PS_FILTERED_SUBSET, group= "Condition", ref = "Mycoup")
+
+write.table(res,"results_deseq2_Mycoup360_vs_Mycoup.txt", sep = "\t", quote = F) 
+
+filtered_res <- subset(res, baseMean > 2)
+
+k<-plotdiff(filtered_res, level="Species", pvalue = 0.05 , log2FC = 2, size = 3) + geom_hline(yintercept = 0, linetype="dotted") + geom_point(size = 6) +
+  labs(y = "\nLog2 Fold-Change for Mycoup 360 vs. Mycoup [p.value = 0.05 , log2FC = ±2]", x = "Species") +
+  theme(axis.text.x = element_text(color = "black", size = 12),
+        axis.text.y = element_text(color = "black", size = 18),
+        axis.title.y = element_text(size = 14),
+        axis.title.x = element_text(size = 16),
+        legend.text = element_text(size = 12),
+        legend.title = element_text(size = 12)) +
+  scale_x_discrete(labels = function(x) gsub("\\(.*\\)", "", x)) +
+  geom_hline(yintercept = 0, linetype="dotted") +
+  ggtitle("Mycoup 360 vs. Mycoup") +
+  theme(plot.title = element_text(size = 18))  
+
+res_signi_Mycoup360_vs_Mycoup <- filtered_res %>% filter (filtered_res$Significant=="Yes")
+
+write.table(res_signi_Mycoup360_vs_Mycoup,"results_deseq2_Mycoup360_vs_Mycoup.signif_pvalue.txt", sep = "\t", quote = F) 
+
+DT::datatable(res_signi_Mycoup360_vs_Mycoup)
+
+ggsave("Taxonomy/Mycoup360_vs_Mycoup_plot.png", plot = k, width = 12, height = 8, dpi = 600, bg = "white")
+```
+
+## Thydra vs. Mycoup
+
+```{r echo=FALSE, fig.height=6, fig.width=15, message=FALSE, warning=FALSE, paged.print=FALSE, include=FALSE}
+PS_FILTERED_SUBSET <- subset_samples(ps_filtered, Condition=="Thydra" | Condition=="Mycoup")
+
+res <-difftest(PS_FILTERED_SUBSET, group= "Condition", ref = "Mycoup")
+
+write.table(res,"results_deseq2_Thydra_vs_Mycoup.txt", sep = "\t", quote = F) 
+
+filtered_res <- subset(res, baseMean > 2)
+
+l<-plotdiff(filtered_res, level="Species", pvalue = 0.05 , log2FC = 2, size = 3) + geom_hline(yintercept = 0, linetype="dotted") + geom_point(size = 6) +
+  labs(y = "\nLog2 Fold-Change for Thydra vs. Mycoup [p.value = 0.05 , log2FC = ±2]", x = "Species") +
+  theme(axis.text.x = element_text(color = "black", size = 12),
+        axis.text.y = element_text(color = "black", size = 18),
+        axis.title.y = element_text(size = 14),
+        axis.title.x = element_text(size = 16),
+        legend.text = element_text(size = 12),
+        legend.title = element_text(size = 12)) +
+  scale_x_discrete(labels = function(x) gsub("\\(.*\\)", "", x)) +
+  geom_hline(yintercept = 0, linetype="dotted") +
+  ggtitle("Thydra vs. Mycoup") +
+  theme(plot.title = element_text(size = 18))  
+
+res_signi_Thydra_vs_Mycoup <- filtered_res %>% filter (filtered_res$Significant=="Yes")
+
+write.table(res_signi_Thydra_vs_Mycoup,"results_deseq2_Thydra_vs_Mycoup.signif_pvalue.txt", sep = "\t", quote = F) 
+
+DT::datatable(res_signi_Thydra_vs_Mycoup)
+
+ggsave("Taxonomy/Thydra_vs_Mycoup_plot.png", plot = l, width = 12, height = 8, dpi = 600, bg = "white")
+```
+
+## Qlimax + Vitasoil vs. Mycoup
+
+```{r echo=FALSE, fig.height=6, fig.width=15, message=FALSE, warning=FALSE, paged.print=FALSE, include=FALSE}
+PS_FILTERED_SUBSET <- subset_samples(ps_filtered, Condition=="Qlimax + Vitasoil" | Condition=="Mycoup")
+
+res <-difftest(PS_FILTERED_SUBSET, group= "Condition", ref = "Mycoup")
+
+write.table(res,"results_deseq2_QlimaxVitasoil_vs_Mycoup.txt", sep = "\t", quote = F) 
+
+filtered_res <- subset(res, baseMean > 2)
+
+m<-plotdiff(filtered_res, level="Species", pvalue = 0.05 , log2FC = 2, size = 3) + geom_hline(yintercept = 0, linetype="dotted") + geom_point(size = 6) +
+  labs(y = "\nLog2 Fold-Change for Qlimax + Vitasoil vs. Mycoup [p.value = 0.05 , log2FC = ±2]", x = "Species") +
+  theme(axis.text.x = element_text(color = "black", size = 12),
+        axis.text.y = element_text(color = "black", size = 18),
+        axis.title.y = element_text(size = 14),
+        axis.title.x = element_text(size = 16),
+        legend.text = element_text(size = 12),
+        legend.title = element_text(size = 12)) +
+  scale_x_discrete(labels = function(x) gsub("\\(.*\\)", "", x)) +
+  geom_hline(yintercept = 0, linetype="dotted") +
+  ggtitle("Qlimax + Vitasoil vs. Mycoup") +
+  theme(plot.title = element_text(size = 18))  
+
+res_signi_QlimaxVitasoil_vs_Mycoup <- filtered_res %>% filter (filtered_res$Significant=="Yes")
+
+write.table(res_signi_QlimaxVitasoil_vs_Mycoup,"results_deseq2_QlimaxVitasoil_vs_Mycoup.signif_pvalue.txt", sep = "\t", quote = F) 
+
+DT::datatable(res_signi_QlimaxVitasoil_vs_Mycoup)
+
+ggsave("Taxonomy/QlimaxVitasoil_vs_Mycoup_plot.png", plot = m, width = 12, height = 8, dpi = 600, bg = "white")
+```
+
+## Mycoup 360 vs. Thydra
+
+```{r echo=FALSE, fig.height=6, fig.width=15, message=FALSE, warning=FALSE, paged.print=FALSE, include=FALSE}
+PS_FILTERED_SUBSET <- subset_samples(ps_filtered, Condition=="Mycoup 360" | Condition=="Thydra")
+
+res <-difftest(PS_FILTERED_SUBSET, group= "Condition", ref = "Thydra")
+
+write.table(res,"results_deseq2_Mycoup360_vs_Thydra.txt", sep = "\t", quote = F) 
+
+filtered_res <- subset(res, baseMean > 2)
+
+o<-plotdiff(filtered_res, level="Species", pvalue = 0.05 , log2FC = 2, size = 3) + geom_hline(yintercept = 0, linetype="dotted") + geom_point(size = 6) +
+  labs(y = "\nLog2 Fold-Change for Mycoup 360 vs. Thydra [p.value = 0.05 , log2FC = ±2]", x = "Species") +
+  theme(axis.text.x = element_text(color = "black", size = 12),
+        axis.text.y = element_text(color = "black", size = 18),
+        axis.title.y = element_text(size = 14),
+        axis.title.x = element_text(size = 16),
+        legend.text = element_text(size = 12),
+        legend.title = element_text(size = 12)) +
+  scale_x_discrete(labels = function(x) gsub("\\(.*\\)", "", x)) +
+  geom_hline(yintercept = 0, linetype="dotted") +
+  ggtitle("Mycoup 360 vs. Thydra") +
+  theme(plot.title = element_text(size = 18))  
+
+res_signi_Mycoup360_vs_Thydra <- filtered_res %>% filter (filtered_res$Significant=="Yes")
+
+write.table(res_signi_Mycoup360_vs_Thydra,"results_deseq2_Mycoup360_vs_Thydra.signif_pvalue.txt", sep = "\t", quote = F) 
+
+DT::datatable(res_signi_Mycoup360_vs_Thydra)
+
+ggsave("Taxonomy/Mycoup360_vs_Thydra_plot.png", plot = o, width = 12, height = 8, dpi = 600, bg = "white")
+```
+
+## Qlimax + Vitasoil vs. Thydra
+
+```{r echo=FALSE, fig.height=6, fig.width=15, message=FALSE, warning=FALSE, paged.print=FALSE, include=FALSE}
+PS_FILTERED_SUBSET <- subset_samples(ps_filtered, Condition=="Qlimax + Vitasoil" | Condition=="Thydra")
+
+res <-difftest(PS_FILTERED_SUBSET, group= "Condition", ref = "Thydra")
+
+write.table(res,"results_deseq2_QlimaxVitasoil_vs_Thydra.txt", sep = "\t", quote = F) 
+
+filtered_res <- subset(res, baseMean > 2)
+
+n<-plotdiff(filtered_res, level="Species", pvalue = 0.05 , log2FC = 2, size = 3) + geom_hline(yintercept = 0, linetype="dotted") + geom_point(size = 6) +
+  labs(y = "\nLog2 Fold-Change for Qlimax + Vitasoil vs. Thydra [p.value = 0.05 , log2FC = ±2]", x = "Species") +
+  theme(axis.text.x = element_text(color = "black", size = 12),
+        axis.text.y = element_text(color = "black", size = 18),
+        axis.title.y = element_text(size = 14),
+        axis.title.x = element_text(size = 16),
+        legend.text = element_text(size = 12),
+        legend.title = element_text(size = 12)) +
+  scale_x_discrete(labels = function(x) gsub("\\(.*\\)", "", x)) +
+  geom_hline(yintercept = 0, linetype="dotted") +
+  ggtitle("Qlimax + Vitasoil vs. Thydra") +
+  theme(plot.title = element_text(size = 18))  
+
+res_signi_QlimaxVitasoil_vs_Thydra <- filtered_res %>% filter (filtered_res$Significant=="Yes")
+
+write.table(res_signi_QlimaxVitasoil_vs_Thydra,"results_deseq2_QlimaxVitasoil_vs_Thydra.signif_pvalue.txt", sep = "\t", quote = F) 
+
+DT::datatable(res_signi_QlimaxVitasoil_vs_Thydra)
+
+ggsave("Taxonomy/QlimaxVitasoil_vs_Thydra_plot.png", plot = n, width = 12, height = 8, dpi = 600, bg = "white")
+```
+
+## Qlimax + Vitasoil vs. Mycoup 360
+
+```{r echo=FALSE, fig.height=6, fig.width=15, message=FALSE, warning=FALSE, paged.print=FALSE, include=FALSE}
+PS_FILTERED_SUBSET <- subset_samples(ps_filtered, Condition=="Qlimax + Vitasoil" | Condition=="Mycoup 360")
+
+res <-difftest(PS_FILTERED_SUBSET, group= "Condition", ref = "Mycoup 360")
+
+write.table(res,"results_deseq2_QlimaxVitasoil_vs_Mycoup360.txt", sep = "\t", quote = F) 
+
+filtered_res <- subset(res, baseMean > 2)
+
+p<-plotdiff(filtered_res, level="Species", pvalue = 0.05 , log2FC = 2, size = 3) + geom_hline(yintercept = 0, linetype="dotted") + geom_point(size = 6) +
+  labs(y = "\nLog2 Fold-Change for Qlimax + Vitasoil vs. Mycoup 360 [p.value = 0.05 , log2FC = ±2]", x = "Species") +
+  theme(axis.text.x = element_text(color = "black", size = 12),
+        axis.text.y = element_text(color = "black", size = 18),
+        axis.title.y = element_text(size = 14),
+        axis.title.x = element_text(size = 16),
+        legend.text = element_text(size = 12),
+        legend.title = element_text(size = 12)) +
+  scale_x_discrete(labels = function(x) gsub("\\(.*\\)", "", x)) +
+  geom_hline(yintercept = 0, linetype="dotted") +
+  ggtitle("Qlimax + Vitasoil vs. Mycoup 360") +
+  theme(plot.title = element_text(size = 18))  
+
+res_signi_QlimaxVitasoil_vs_Mycoup360 <- filtered_res %>% filter (filtered_res$Significant=="Yes")
+
+write.table(res_signi_QlimaxVitasoil_vs_Mycoup360,"results_deseq2_QlimaxVitasoil_vs_Mycoup360.signif_pvalue.txt", sep = "\t", quote = F) 
+
+DT::datatable(res_signi_QlimaxVitasoil_vs_Mycoup360)
+
+ggsave("Taxonomy/QlimaxVitasoil_vs_Mycoup360_plot.png", plot = p, width = 12, height = 8, dpi = 600, bg = "white")
+```
+
+render("Metagenomics_analysis.Patata.v2.Rmd", output_format = "html_document")
+
